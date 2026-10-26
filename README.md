@@ -60,7 +60,7 @@ Debajo del edificio, un directorio con marco de latón: una tarjeta por agente, 
 - **🛗 Ascensor:** recorre los pisos de los agentes activos llevando un sobre.
 - **🕊️ Paloma mensajera:** cruza el cielo con el último aviso ("API DE PAGOS te necesita").
 - **🏭 Centro de datos:** un contador con **todos los tokens que has generado en tu vida** con Claude Code y el ritmo actual en tokens por minuto.
-- **🌤️ El tiempo real de tu ciudad**, vía [Open-Meteo](https://open-meteo.com), sin clave.
+- **🌤️ El tiempo real de donde estás**: detecta tu ubicación sola y consulta [Open-Meteo](https://open-meteo.com), sin claves.
 - **☀️🌆🌙 El cielo sigue la hora de tu ciudad:** de día, al atardecer o de noche con estrellas y ventanas encendidas.
 
 <div align="center">
@@ -103,9 +103,11 @@ El panel se abre solo al empezar cada sesión. Si lo cierras, vuelve con:
 
 | Opción | Por defecto | Qué hace |
 |---|---|---|
-| `city` | `Alicante` | La ciudad del tiempo y del cielo. Cualquier ciudad del mundo: `Madrid`, `Ciudad de México`, `Buenos Aires`… |
+| `city` | *(vacío)* | Vacío: usa tu ubicación real (ver abajo). Si pones una ciudad, se usa esa: `Madrid`, `Ciudad de México`, `Buenos Aires`… |
 
-Cámbiala desde el menú de configuración de Claude Code (`/config`), o en `~/.claude/settings.json`:
+**¿De dónde saca tu ubicación?** En Windows, de la **ubicación del sistema** (Wi-Fi/GPS, la misma que usa el mapa), que es donde estás de verdad. Si no está disponible (o en macOS y Linux), la deduce de tu IP, que es menos precisa: según el operador puede situarte en otra ciudad. El nombre del lugar sale de [OpenStreetMap](https://www.openstreetmap.org). Se consulta cada 30 min y se comparte entre todas tus sesiones.
+
+Para fijar una ciudad, cámbiala desde el menú de configuración de Claude Code (`/config`), o en `~/.claude/settings.json`:
 
 ```json
 {
@@ -126,11 +128,12 @@ Cámbiala desde el menú de configuración de Claude Code (`/config`), o en `~/.
                                                                    hooks/register.tsx ──► panel
 ~/.claude/oficina-agentes/<sesión>.json ◄── cada sesión con el mod                (SVG animado)
    (estado exacto: ¿espera permiso?)         escribe su propio estado
+~/.claude/oficina-agentes/place.json    ◄── el escáner localiza el PC (Windows o IP)
 ```
 
 - **Todas las sesiones de tu PC:** el escáner lee las transcripciones que Claude Code guarda en `~/.claude/projects`. De ahí saca el título, lo que está haciendo, los tokens y los subagentes. Lee cada archivo de forma incremental y guarda su progreso en caché, así que es ligero aunque tengas cientos de MB de historial.
 - **Estado exacto:** cada sesión que tiene el mod cargado escribe su propio estado (por ejemplo, "esperando tu permiso"), y ese manda sobre lo que se deduce de la transcripción.
-- **Sin parpadeos:** el panel solo se redibuja cuando un piso cambia de color o llega o se va un agente; los contadores, como mucho cada 20 s. Todas las animaciones van sincronizadas con el reloj, así que tras un redibujado siguen donde estaban.
+- **Sin parpadeos:** el edificio y el directorio son una sola imagen que solo se regenera cuando un piso cambia de color o llega o se va un agente (y cada 5 min para los números). Al hacer scroll o clic se reutiliza exactamente la misma imagen, y se pinta como imagen normal, no como marco interactivo, así que al cambiar no hay flash. Las animaciones van sincronizadas con el reloj: tras un cambio siguen donde estaban. Los contadores en vivo van en texto nativo del panel.
 - **Coste:** exacto para las sesiones con el mod. Para el resto se estima a partir de los tokens con precios aproximados por modelo.
 
 ### Estructura
@@ -144,13 +147,15 @@ hooks/
   tower.ts           el rascacielos (SVG)
   directory.ts       el directorio del vestíbulo (SVG)
 scanner/
-  scan.cjs           vigila ~/.claude/projects
+  scan.cjs           vigila ~/.claude/projects y localiza el PC
 types/index.d.ts     contrato de estado del mod
+tests/
+  pane.test.tsx      el panel en escritorio y terminal; un scroll no regenera el dibujo (claude plugin test)
 ```
 
 ### 🔒 Privacidad
 
-Todo se queda en tu máquina. Lo único que sale a internet es la consulta del tiempo a Open-Meteo con el nombre de tu ciudad.
+Tus sesiones y transcripciones no salen de tu máquina. Lo único que sale a internet es lo necesario para el tiempo: tus coordenadas aproximadas a OpenStreetMap (para el nombre del lugar) y a Open-Meteo (para el tiempo), y, solo si no hay ubicación del sistema, una consulta de tu IP a ipwho.is. Si pones `city`, no se usa tu ubicación.
 
 ---
 
@@ -163,7 +168,7 @@ Todo se queda en tu máquina. Lo único que sale a internet es la consulta del t
 - 🟡 **To review:** finished, waiting for you to look.
 - 💤 **Sleeping:** idle.
 
-Each office shows the session title, tokens, cost, and its subagents. Below the tower, a lobby **directory** lists every agent, the ones that need you first. Plus an elevator carrying messages, a carrier pigeon with the latest alert, a data center counting **every token you've ever generated**, and real weather with a sky that follows your city's time of day.
+Each office shows the session title, tokens, cost, and its subagents. Below the tower, a lobby **directory** lists every agent, the ones that need you first. Plus an elevator carrying messages, a carrier pigeon with the latest alert, a data center counting **every token you've ever generated**, and real weather where you are, with a sky that follows the local time of day.
 
 **Install** (needs Claude Code and Node.js):
 
@@ -171,9 +176,9 @@ Each office shows the session title, tokens, cost, and its subagents. Below the 
 /plugin install oficina-agentes --marketplace envyx10/oficina-agentes
 ```
 
-Open the panel with `/control` (or `/oficina`). Set your city with the `city` option (default `Alicante`). The interface is in Spanish.
+Open the panel with `/control` (or `/oficina`). Your location is detected automatically: Windows location services first (where you really are), else your IP. Or pin a city with the `city` option. The interface is in Spanish.
 
-It reads the transcripts Claude Code keeps in `~/.claude/projects`, incrementally and locally. The only network call is the weather lookup on Open-Meteo.
+It reads the transcripts Claude Code keeps in `~/.claude/projects`, incrementally and locally. The only network calls are for the weather: your approximate coordinates to OpenStreetMap and Open-Meteo, and an IP lookup only when there is no system location.
 
 ---
 

@@ -19,6 +19,9 @@ export type Floor = {
 
 export type Weather = { tempC: number; label: string; city?: string; timeZone?: string }
 
+/** What the drawing of the tower shows: taken when a floor changes colour, or every 5 min. */
+export type TowerSnapshot = { floors: Floor[]; historic: number; tpm: number; at: number }
+
 declare module 'claude-code' {
   interface PluginState {
     'oficina-agentes': {
@@ -27,6 +30,7 @@ declare module 'claude-code' {
       weather: Weather | null
       historic: number
       tpm: number
+      tower: TowerSnapshot | null
     }
   }
 }

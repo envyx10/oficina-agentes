@@ -222,11 +222,84 @@ function saveCache() {
   } catch {}
 }
 
+// Where this machine is, for the weather and the sky. The operating system's own
+// location (Windows location services: Wi-Fi or GPS) first, which is where you
+// really are; the public IP only where that is not available, as an IP is often
+// placed in another city. Kept 30 min in place.json, shared by every session.
+const PLACE = path.join(OUT_DIR, 'place.json')
+const PLACE_MS = 30 * 60_000
+const UA = { 'User-Agent': 'oficina-agentes (https://github.com/envyx10/oficina-agentes)' }
+let place = null
+
+function windowsLocation() {
+  if (process.platform !== 'win32') return Promise.resolve(null)
+  const script = [
+    'Add-Type -AssemblyName System.Device',
+    '$w = New-Object System.Device.Location.GeoCoordinateWatcher',
+    '$null = $w.TryStart($false, [TimeSpan]::FromSeconds(8))',
+    '$i = 0; while ($w.Status -ne "Ready" -and $i -lt 40) { Start-Sleep -Milliseconds 250; $i++ }',
+    '$c = $w.Position.Location',
+    'if (-not $c.IsUnknown) { "{0} {1}" -f $c.Latitude.ToString([cultureinfo]::InvariantCulture), $c.Longitude.ToString([cultureinfo]::InvariantCulture) }',
+    '$w.Stop()',
+  ].join('; ')
+  return new Promise(resolve => {
+    require('child_process').execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { timeout: 25_000, windowsHide: true }, (err, stdout) => {
+        const [lat, lon] = String(stdout || '').trim().split(/\s+/).map(Number)
+        resolve(!err && Number.isFinite(lat) && Number.isFinite(lon) ? { latitude: lat, longitude: lon, source: 'windows' } : null)
+      })
+  })
+}
+
+async function getJson(url) {
+  const res = await fetch(url, { headers: UA, signal: AbortSignal.timeout(10_000) })
+  if (!res.ok) throw new Error(String(res.status))
+  return res.json()
+}
+
+async function ipLocation() {
+  try {
+    const j = await getJson('https://ipwho.is/')
+    if (j.success && Number.isFinite(j.latitude)) return { latitude: j.latitude, longitude: j.longitude, name: j.city, source: 'ip' }
+  } catch {}
+  try {
+    const j = await getJson('https://free.freeipapi.com/api/json')
+    if (Number.isFinite(j.latitude)) return { latitude: j.latitude, longitude: j.longitude, name: j.cityName, source: 'ip' }
+  } catch {}
+  return null
+}
+
+// the town's name for a point, from OpenStreetMap
+async function townAt(lat, lon) {
+  try {
+    const j = await getJson(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=10&accept-language=es&lat=${lat}&lon=${lon}`)
+    const a = j.address || {}
+    return a.city || a.town || a.village || a.municipality || a.state_district || null
+  } catch {
+    return null
+  }
+}
+
+async function locate() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(PLACE, 'utf8'))
+    if (Date.now() - saved.at < PLACE_MS) { place = saved; return }
+  } catch {}
+  const found = (await windowsLocation()) || (await ipLocation())
+  if (!found) return
+  const name = (await townAt(found.latitude, found.longitude)) || found.name
+  if (!name) return
+  place = { name, latitude: found.latitude, longitude: found.longitude, source: found.source, at: Date.now() }
+  try { fs.mkdirSync(OUT_DIR, { recursive: true }); fs.writeFileSync(PLACE, JSON.stringify(place)) } catch {}
+}
+
 const once = process.argv.includes('--once')
-const tick = () => process.stdout.write(JSON.stringify(scan()) + '\n')
+const tick = () => process.stdout.write(JSON.stringify({ ...scan(), place }) + '\n')
 tick()
 saveCache()
 if (!once) {
+  locate().then(tick, () => {})
+  setInterval(() => { locate().catch(() => {}) }, PLACE_MS)
   setInterval(tick, 2000)
   setInterval(saveCache, 30_000)
   // the mod kills this process when it unloads; also leave if the session's process is gone

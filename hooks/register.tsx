@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Floor, FloorStatus, Weather } from '../types'
+import type { Floor, FloorStatus, TowerSnapshot, Weather } from '../types'
 import { renderDirectory } from './directory'
 import { formatTokens, renderTower } from './tower'
 
@@ -20,6 +20,7 @@ const floorsAtom = atom({ plugin: 'oficina-agentes', key: 'floors' } as const, [
 const weatherAtom = atom({ plugin: 'oficina-agentes', key: 'weather' } as const, null)
 const historicAtom = atom({ plugin: 'oficina-agentes', key: 'historic' } as const, 0)
 const tpmAtom = atom({ plugin: 'oficina-agentes', key: 'tpm' } as const, 0)
+const towerAtom = atom({ plugin: 'oficina-agentes', key: 'tower' } as const, null)
 
 type SessionRecord = Floor & { ended?: boolean; named?: boolean }
 
@@ -41,6 +42,17 @@ const STATUS_LABEL: { [K in FloorStatus]: string } = {
   needs: 'te necesita',
   review: 'para revisar',
   sleeping: 'dormido',
+}
+
+// the directory lists the agents that need you first
+const ORDER: { [K in FloorStatus]: number } = { needs: 0, working: 1, review: 2, sleeping: 3 }
+
+function ago(ms: number) {
+  const m = Math.max(0, Math.round(ms / 60_000))
+  if (m < 1) return 'ahora'
+  if (m < 60) return `hace ${m} min`
+  const h = Math.floor(m / 60)
+  return h < 24 ? `hace ${h} h` : `hace ${Math.floor(h / 24)} d`
 }
 
 function nameFrom(text: string) {
@@ -101,13 +113,15 @@ async function saveMe($: EngineInterface, patch: Partial<SessionRecord>) {
 }
 
 type ScanSession = Floor & { project: string; subagents: number }
-type ScanResult = { sessions: ScanSession[]; historic: number; at: number }
+type ScanPlace = { name: string; latitude: number; longitude: number }
+type ScanResult = { sessions: ScanSession[]; historic: number; at: number; place?: ScanPlace | null }
 
 let lastScan: ScanResult | null = null
 const modRecords = new Map<string, SessionRecord>()
-const REDRAW_MS = 20_000
+const TOWER_MS = 5 * 60_000
 let lastShape = ''
-let lastDrawAt = 0
+// the drawing's markup, made again only when what it shows changes
+let towerCache: { key: string; svg: string; width: number; height: number } | null = null
 
 // the mod's own records: exact status of sessions that load this mod
 async function readModRecords($: EngineInterface, now: number) {
@@ -166,18 +180,21 @@ async function publish($: EngineInterface) {
   const minutes = first ? (now - first.t) / 60_000 : 0
   const tpm = minutes > 0.25 && first ? Math.round((historic - first.total) / minutes) : 0
 
-  // every write redraws the drawing, which reloads it: redraw at once when a
-  // floor changes colour or an agent comes or goes, the counters at most every 20 s
-  const shape = floors.map(f => `${f.id}:${f.status}:${f.name}:${Math.min(1, f.subagents ?? 0)}`).join('|')
-  const isDue = now - lastDrawAt >= REDRAW_MS
-  if (shape === lastShape && !isDue) return
-  const before = await read($, floorsAtom)
-  const changed = JSON.stringify(before) !== JSON.stringify(floors)
-  if (shape !== lastShape || changed) await update($, floorsAtom, () => floors)
+  // live values feed the native parts of the pane, which redraw without a flash
+  if (JSON.stringify(await read($, floorsAtom)) !== JSON.stringify(floors)) await update($, floorsAtom, () => floors)
   if ((await read($, historicAtom)) !== historic) await update($, historicAtom, () => historic)
-  if ((await read($, tpmAtom)) !== tpm) await update($, tpmAtom, () => tpm)
-  lastShape = shape
-  lastDrawAt = now
+  const shown = await read($, tpmAtom)
+  if (Math.abs(tpm - shown) > Math.max(50, shown * 0.05)) await update($, tpmAtom, () => tpm)
+
+  // the drawing reloads whole whenever its markup changes, so its snapshot
+  // moves only when a floor changes colour or an agent comes or goes, or every 5 min
+  const shape = floors.map(f => `${f.id}:${f.status}:${f.name}:${Math.min(1, f.subagents ?? 0)}`).join('|')
+  const snapshot = await read($, towerAtom)
+  if (shape !== lastShape || !snapshot || now - snapshot.at >= TOWER_MS) {
+    const next: TowerSnapshot = { floors, historic, tpm, at: now }
+    await update($, towerAtom, () => next)
+    lastShape = shape
+  }
 }
 
 async function poll($: EngineInterface) {
@@ -186,7 +203,7 @@ async function poll($: EngineInterface) {
 }
 
 // a long-lived node process that watches ~/.claude/projects and prints a JSON line every 2 s
-async function runScanner($: EngineInterface) {
+async function runScanner($: EngineInterface, city: string) {
   const script = `${$.plugin.root}/scanner/scan.cjs`
   for (const node of ['node', 'C:\\Program Files\\nodejs\\node.exe', '/usr/local/bin/node', '/opt/homebrew/bin/node']) {
     try {
@@ -202,6 +219,11 @@ async function runScanner($: EngineInterface) {
           try {
             lastScan = JSON.parse(line) as ScanResult
             await publish($)
+            const place = lastScan.place
+            if (!city && place && place.name !== weatherPlace) {
+              weatherPlace = place.name
+              void fetchWeather($, city)
+            }
           } catch {
             // a line cut short: skip it
           }
@@ -247,36 +269,46 @@ function stack(parts: { svg: string; width: number; height: number }[], gap: num
   return { svg, width, height }
 }
 
-// the city from the mod's options, found by Open-Meteo's geocoder (no key needed)
+type Place = { latitude: number; longitude: number; name: string; timeZone?: string }
+
+async function fetchJson<T>($: EngineInterface, url: string): Promise<T | undefined> {
+  const res = await $.http.fetch(url).catch(() => undefined)
+  if (!res?.ok) return undefined
+  try {
+    return JSON.parse(res.text) as T
+  } catch {
+    return undefined
+  }
+}
+
+// where the weather is for: the city named in the options, found by Open-Meteo's
+// geocoder; with none, where the scanner says this machine is (the system's own
+// location, else its IP). The scanner asks on the machine's own network: asked
+// from here, through the host, an IP lookup can place it in another city
+let weatherPlace = ''
+
+async function findPlace($: EngineInterface, city: string): Promise<Place | undefined> {
+  if (!city) return lastScan?.place ?? undefined
+  type Found = { results?: { latitude: number; longitude: number; name: string; timezone?: string }[] }
+  const hit = (await fetchJson<Found>($, `https://geocoding-api.open-meteo.com/v1/search?count=1&language=es&name=${encodeURIComponent(city)}`))?.results?.[0]
+  return hit ? { latitude: hit.latitude, longitude: hit.longitude, name: hit.name, timeZone: hit.timezone } : undefined
+}
+
 async function fetchWeather($: EngineInterface, city: string) {
-  const found = await $.http
-    .fetch(`https://geocoding-api.open-meteo.com/v1/search?count=1&language=es&name=${encodeURIComponent(city)}`)
-    .catch(() => undefined)
-  let place: { latitude: number; longitude: number; name: string; timezone?: string } | undefined
-  try {
-    place = found?.ok ? (JSON.parse(found.text) as { results?: (typeof place)[] }).results?.[0] : undefined
-  } catch {
-    place = undefined
-  }
+  const place = await findPlace($, city)
   if (!place) return
-  const res = await $.http
-    .fetch(`https://api.open-meteo.com/v1/forecast?latitude=${place.latitude}&longitude=${place.longitude}&current=temperature_2m,weather_code&timezone=auto`)
-    .catch(() => undefined)
-  if (!res?.ok) return
-  try {
-    const data = JSON.parse(res.text) as { timezone?: string; current?: { temperature_2m?: number; weather_code?: number } }
-    const c = data.current
-    if (c?.temperature_2m === undefined) return
-    const weather: Weather = {
-      tempC: c.temperature_2m,
-      label: weatherLabel(c.weather_code ?? 0),
-      city: place.name,
-      timeZone: data.timezone ?? place.timezone,
-    }
-    await update($, weatherAtom, () => weather)
-  } catch {
-    // keep the last reading
+  type Forecast = { timezone?: string; current?: { temperature_2m?: number; weather_code?: number } }
+  const data = await fetchJson<Forecast>($,
+    `https://api.open-meteo.com/v1/forecast?latitude=${place.latitude}&longitude=${place.longitude}&current=temperature_2m,weather_code&timezone=auto`)
+  const c = data?.current
+  if (c?.temperature_2m === undefined) return
+  const weather: Weather = {
+    tempC: c.temperature_2m,
+    label: weatherLabel(c.weather_code ?? 0),
+    city: place.name,
+    timeZone: data?.timezone ?? place.timeZone,
   }
+  if (JSON.stringify(await read($, weatherAtom)) !== JSON.stringify(weather)) await update($, weatherAtom, () => weather)
 }
 
 async function refreshCost($: EngineInterface) {
@@ -286,7 +318,7 @@ async function refreshCost($: EngineInterface) {
 }
 
 export const register: Register = (on, options) => {
-  const city = String(options.city ?? '').trim() || 'Alicante'
+  const city = String(options.city ?? '').trim()
 
   on('session.start', async ($, e, next) => {
     const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '.'
@@ -322,7 +354,7 @@ export const register: Register = (on, options) => {
     void $.ui.open({ id: PANE, title: TITLE, columns: 64 })
 
     await poll($)
-    void runScanner($)
+    void runScanner($, city)
     void fetchWeather($, city)
     $.clock.every(POLL_MS, () => void poll($))
     $.clock.every(60_000, () => void saveMe($, {}))
@@ -426,12 +458,7 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
 
     const count = (s: FloorStatus) => floors.filter(f => f.status === s).length
-    const recent = [...floors]
-      .filter(f => (f.status === 'review' || f.status === 'needs') && now - f.changedAt < 15 * 60_000)
-      .sort((a, b) => b.changedAt - a.changedAt)[0]
-    const latest = recent
-      ? recent.status === 'needs' ? `NUEVO · ${recent.name} te necesita` : `NUEVO · Terminado: ${recent.name}`
-      : null
+    const meId = me?.id ?? null
 
     const chips = (
       <Box flexDirection="row" flexWrap="wrap" gap={1}>
@@ -441,7 +468,7 @@ export const register: Register = (on, options) => {
           </Text>
         ))}
         <Text dimColor>
-          ☁ {weather ? `${weather.label} · ${Math.round(weather.tempC)}°` : '--°'} · {weather?.city ?? city}
+          ☁ {weather ? `${weather.label} · ${Math.round(weather.tempC)}° · ${weather.city ?? ''}` : 'Buscando el tiempo…'}
         </Text>
       </Box>
     )
@@ -454,46 +481,70 @@ export const register: Register = (on, options) => {
       />
     ) : null
 
-    if ('Svg' in table) {
+    // the terminal has no drawing: there the directory is plain rows
+    const rows = [...floors].sort((a, b) => ORDER[a.status] - ORDER[b.status] || b.changedAt - a.changedAt)
+    const textDirectory = (
+      <Box flexDirection="column">
+        {rows.map(f => (
+          <Box key={`row-${f.id}`} flexDirection="row" gap={1}>
+            <Text color={STATUS_COLOR[f.status]}>●</Text>
+            <Text bold={f.id === meId}>{f.name}</Text>
+            <Text dimColor>{STATUS_LABEL[f.status]} · {f.activity} · {formatTokens(f.tokens)} · ${f.costUsd.toFixed(2)}</Text>
+          </Box>
+        ))}
+      </Box>
+    )
+
+    if (e.surface !== 'terminal' && 'Svg' in table) {
       const Svg = table.Svg
       // the body's width in cells, at roughly 7.4 CSS pixels per cell on the app's panel
       const pixelWidth = Math.max(280, Math.min(900, Math.round((e.props.bodyColumns ?? 60) * 7.4)))
-      const tower = renderTower({ floors, meId: me?.id ?? null, weather, historic, tpm, hour: localHour(now, weather?.timeZone), latest })
-      const directory = renderDirectory({ floors, meId: me?.id ?? null, now })
-      // one drawing: the tower with the lobby directory beneath it
-      const scene = stack([tower, directory], 10)
+      const snapshot = (await read($, towerAtom)) ?? { floors, historic, tpm, at: now }
+      const hour = localHour(snapshot.at, weather?.timeZone)
+      const key = JSON.stringify([snapshot, weather, meId, hour])
+      // a scroll, a click or a live counter redraws the pane: hand back the very
+      // same markup then, so the drawing is not drawn again; it is drawn as a plain
+      // image (no isInteractive): a new one replaces it without the flash of a
+      // frame reloading, and its SMIL animations still run
+      if (towerCache?.key !== key) {
+        const recent = [...snapshot.floors]
+          .filter(f => (f.status === 'review' || f.status === 'needs') && snapshot.at - f.changedAt < 15 * 60_000)
+          .sort((a, b) => b.changedAt - a.changedAt)[0]
+        const latest = recent
+          ? recent.status === 'needs' ? `NUEVO · ${recent.name} te necesita` : `NUEVO · Terminado: ${recent.name}`
+          : null
+        const tower = renderTower({ floors: snapshot.floors, meId, weather, historic: snapshot.historic, tpm: snapshot.tpm, hour, latest })
+        const lobby = renderDirectory({ floors: snapshot.floors, meId, now: snapshot.at })
+        // one drawing: the tower with the lobby directory beneath it
+        const scene = stack([tower, lobby], 10)
+        towerCache = { key, svg: syncToClock(scene.svg, now), width: scene.width, height: scene.height }
+      }
       return (
         <Box flexDirection="column" gap={1}>
           {chips}
           {reviewButton}
           <Svg
-            source={syncToClock(scene.svg, now)}
+            key="tower"
+            source={towerCache.svg}
             width={pixelWidth}
-            height={Math.round((pixelWidth * scene.height) / scene.width)}
-            alt={`Rascacielos con ${floors.length} agentes: ${count('working')} trabajando, ${count('needs')} te necesitan, ${count('review')} para revisar. ` +
-              floors.map(f => `${f.name}: ${STATUS_LABEL[f.status]}, ${f.activity}`).join('. ')}
-            isInteractive
+            height={Math.round((pixelWidth * towerCache.height) / towerCache.width)}
+            alt={`Rascacielos con ${floors.length} agentes: ${count('working')} trabajando, ${count('needs')} te necesitan, ${count('review')} para revisar`}
           />
+          <Text mono size="caption" color="#7dd3fc">
+            CENTRO DE DATOS · {Math.floor(historic).toLocaleString('es-ES')} tokens · +{tpm.toLocaleString('es-ES')}/min
+          </Text>
         </Box>
       )
     }
 
-    // terminal: a text tower
+    // terminal: the directory alone
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" gap={1}>
         <Text bold color="#a78bfa">MI OFICINA DE AGENTES DE IA</Text>
         {chips}
-        <Text dimColor>{'      ▲'}</Text>
-        {[...floors].reverse().map(f => (
-          <Box key={`t-${f.id}`} flexDirection="row">
-            <Text backgroundColor={STATUS_COLOR[f.status]} color="#ffffff"> {f.initials.padEnd(2)} </Text>
-            <Text> {f.name} </Text>
-            <Text dimColor>{STATUS_LABEL[f.status]} · {formatTokens(f.tokens)}</Text>
-          </Box>
-        ))}
-        <Text dimColor>▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</Text>
         <Text color="#7dd3fc">Tokens: {Math.floor(historic).toLocaleString('es-ES')} · +{tpm}/min</Text>
         {reviewButton}
+        {textDirectory}
       </Box>
     )
   })
