@@ -1,0 +1,27 @@
+{
+  "name": "oficina-agentes",
+  "version": "0.1.0",
+  "description": "Mi oficina de agentes de IA: un rascacielos pixel-art donde cada sesión de Claude Code es un piso (rojo = te necesita, amarillo = para revisar).",
+  "author": {
+    "name": "envyx10",
+    "url": "https://github.com/envyx10"
+  },
+  "repository": "https://github.com/envyx10/oficina-agentes",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "mod",
+    "pixel-art",
+    "agents",
+    "dashboard"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "city": {
+      "type": "string",
+      "title": "Ciudad",
+      "description": "Ciudad del tiempo y del cielo del edificio (Open-Meteo). Ejemplo: Madrid, Ciudad de México, Buenos Aires.",
+      "default": "Alicante"
+    }
+  }
+}

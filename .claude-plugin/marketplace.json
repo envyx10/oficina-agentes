@@ -1,0 +1,16 @@
+{
+  "name": "oficina-agentes",
+  "owner": {
+    "name": "envyx10"
+  },
+  "metadata": {
+    "description": "Mods de Claude Code de envyx10: Mi oficina de agentes de IA."
+  },
+  "plugins": [
+    {
+      "name": "oficina-agentes",
+      "source": "./",
+      "description": "Un rascacielos pixel-art donde cada sesión de Claude Code es un piso: quién trabaja, quién te necesita y cuánto gasta cada agente."
+    }
+  ]
+}
