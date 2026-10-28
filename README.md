@@ -105,6 +105,10 @@ El panel se abre solo al empezar cada sesión. Si lo cierras, vuelve con:
 |---|---|---|
 | `city` | *(vacío)* | Vacío: usa tu ubicación real (ver abajo). Si pones una ciudad, se usa esa: `Madrid`, `Ciudad de México`, `Buenos Aires`… |
 
+| `jiraSite`, `jiraEmail`, `jiraToken` | *(vacío)* | Jira Cloud (`empresa.atlassian.net`), tu correo y un [token de API](https://id.atlassian.com/manage-profile/security/api-tokens). Con los tres, el directorio lista tus tickets asignados sin terminar (se consultan cada 5 min). Sin ellos, Jira no se usa. |
+
+**Merge requests y pull requests:** si una sesión enlaza un MR de GitLab (`…/-/merge_requests/12`) o un PR de GitHub (`…/pull/12`), su tarjeta muestra una etiqueta `MR !12` / `MR #12` con el último enlace visto. No hace falta configurar nada.
+
 **¿De dónde saca tu ubicación?** En Windows, de la **ubicación del sistema** (Wi-Fi/GPS, la misma que usa el mapa), que es donde estás de verdad. Si no está disponible (o en macOS y Linux), la deduce de tu IP, que es menos precisa: según el operador puede situarte en otra ciudad. El nombre del lugar sale de [OpenStreetMap](https://www.openstreetmap.org). Se consulta cada 30 min y se comparte entre todas tus sesiones.
 
 Para fijar una ciudad, cámbiala desde el menú de configuración de Claude Code (`/config`), o en `~/.claude/settings.json`:

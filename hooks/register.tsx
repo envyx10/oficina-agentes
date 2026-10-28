@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Floor, FloorStatus, TowerSnapshot, Weather } from '../types'
+import type { Floor, FloorStatus, JiraState, TowerSnapshot, Weather } from '../types'
 import { renderDirectory } from './directory'
 import { formatTokens, renderTower } from './tower'
 
@@ -114,7 +114,7 @@ async function saveMe($: EngineInterface, patch: Partial<SessionRecord>) {
 
 type ScanSession = Floor & { project: string; subagents: number }
 type ScanPlace = { name: string; latitude: number; longitude: number }
-type ScanResult = { sessions: ScanSession[]; historic: number; at: number; place?: ScanPlace | null }
+type ScanResult = { sessions: ScanSession[]; historic: number; at: number; place?: ScanPlace | null; jira?: JiraState | null }
 
 let lastScan: ScanResult | null = null
 const modRecords = new Map<string, SessionRecord>()
@@ -188,10 +188,12 @@ async function publish($: EngineInterface) {
 
   // the drawing reloads whole whenever its markup changes, so its snapshot
   // moves only when a floor changes colour or an agent comes or goes, or every 5 min
-  const shape = floors.map(f => `${f.id}:${f.status}:${f.name}:${Math.min(1, f.subagents ?? 0)}`).join('|')
+  const jira = lastScan?.jira ?? null
+  const shape = floors.map(f => `${f.id}:${f.status}:${f.name}:${Math.min(1, f.subagents ?? 0)}:${f.mr?.url ?? ''}`).join('|') +
+    JSON.stringify(jira)
   const snapshot = await read($, towerAtom)
   if (shape !== lastShape || !snapshot || now - snapshot.at >= TOWER_MS) {
-    const next: TowerSnapshot = { floors, historic, tpm, at: now }
+    const next: TowerSnapshot = { floors, historic, tpm, at: now, jira }
     await update($, towerAtom, () => next)
     lastShape = shape
   }
@@ -203,12 +205,12 @@ async function poll($: EngineInterface) {
 }
 
 // a long-lived node process that watches ~/.claude/projects and prints a JSON line every 2 s
-async function runScanner($: EngineInterface, city: string) {
+async function runScanner($: EngineInterface, city: string, env: Record<string, string>) {
   const script = `${$.plugin.root}/scanner/scan.cjs`
   for (const node of ['node', 'C:\\Program Files\\nodejs\\node.exe', '/usr/local/bin/node', '/opt/homebrew/bin/node']) {
     try {
       let buffer = ''
-      for await (const piece of $.process.spawn({ argv: [node, script] })) {
+      for await (const piece of $.process.spawn({ argv: [node, script], env })) {
         if (piece.stream !== 'stdout') continue
         buffer += piece.text
         let cut = buffer.indexOf('\n')
@@ -319,6 +321,12 @@ async function refreshCost($: EngineInterface) {
 
 export const register: Register = (on, options) => {
   const city = String(options.city ?? '').trim()
+  // the Jira options go to the scanner, which asks Jira; the token stays in its environment
+  const jiraEnv = {
+    JIRA_SITE: String(options.jiraSite ?? ''),
+    JIRA_EMAIL: String(options.jiraEmail ?? ''),
+    JIRA_TOKEN: String(options.jiraToken ?? ''),
+  }
 
   on('session.start', async ($, e, next) => {
     const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '.'
@@ -354,7 +362,7 @@ export const register: Register = (on, options) => {
     void $.ui.open({ id: PANE, title: TITLE, columns: 64 })
 
     await poll($)
-    void runScanner($, city)
+    void runScanner($, city, jiraEnv)
     void fetchWeather($, city)
     $.clock.every(POLL_MS, () => void poll($))
     $.clock.every(60_000, () => void saveMe($, {}))
@@ -456,8 +464,9 @@ export const register: Register = (on, options) => {
     const historic = await read($, historicAtom)
     const tpm = await read($, tpmAtom)
     const now = await $.clock.now()
+    const jira = (await read($, towerAtom))?.jira ?? null
 
-    const count = (s: FloorStatus) => floors.filter(f => f.status === s).length
+    const count =(s: FloorStatus) => floors.filter(f => f.status === s).length
     const meId = me?.id ?? null
 
     const chips = (
@@ -489,9 +498,18 @@ export const register: Register = (on, options) => {
           <Box key={`row-${f.id}`} flexDirection="row" gap={1}>
             <Text color={STATUS_COLOR[f.status]}>●</Text>
             <Text bold={f.id === meId}>{f.name}</Text>
-            <Text dimColor>{STATUS_LABEL[f.status]} · {f.activity} · {formatTokens(f.tokens)} · ${f.costUsd.toFixed(2)}</Text>
+            <Text dimColor>{STATUS_LABEL[f.status]} · {f.activity} · {formatTokens(f.tokens)} · ${f.costUsd.toFixed(2)}{f.mr ? ` · MR ${f.mr.label}` : ''}</Text>
           </Box>
         ))}
+        {jira ? (
+          <Box flexDirection="column">
+            <Text bold color="#a78bfa">JIRA · mis tickets</Text>
+            {jira.error ? <Text dimColor>{jira.error}</Text> : null}
+            {jira.tickets.map(t => (
+              <Text key={`jira-${t.key}`}>{t.key} {t.summary} <Text dimColor>[{t.status}]</Text></Text>
+            ))}
+          </Box>
+        ) : null}
       </Box>
     )
 
@@ -514,7 +532,7 @@ export const register: Register = (on, options) => {
           ? recent.status === 'needs' ? `NUEVO · ${recent.name} te necesita` : `NUEVO · Terminado: ${recent.name}`
           : null
         const tower = renderTower({ floors: snapshot.floors, meId, weather, historic: snapshot.historic, tpm: snapshot.tpm, hour, latest })
-        const lobby = renderDirectory({ floors: snapshot.floors, meId, now: snapshot.at })
+        const lobby = renderDirectory({ floors: snapshot.floors, meId, now: snapshot.at, jira: snapshot.jira })
         // one drawing: the tower with the lobby directory beneath it
         const scene = stack([tower, lobby], 10)
         towerCache = { key, svg: syncToClock(scene.svg, now), width: scene.width, height: scene.height }
