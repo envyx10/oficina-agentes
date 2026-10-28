@@ -1,6 +1,6 @@
 {
   "name": "oficina-agentes",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Mi oficina de agentes de IA: un rascacielos pixel-art donde cada sesión de Claude Code es un piso (rojo = te necesita, amarillo = para revisar).",
   "author": {
     "name": "envyx10",
@@ -21,6 +21,25 @@
       "type": "string",
       "title": "Ciudad",
       "description": "Ciudad del tiempo y del cielo del edificio. Vacío: se detecta por tu IP. Ejemplo: Madrid, Ciudad de México, Buenos Aires.",
+      "default": ""
+    },
+    "jiraSite": {
+      "type": "string",
+      "title": "Jira: sitio",
+      "description": "Tu Jira Cloud, p. ej. empresa.atlassian.net. Con el correo y el token, el edificio lista tus tickets asignados. Vacío: sin Jira.",
+      "default": ""
+    },
+    "jiraEmail": {
+      "type": "string",
+      "title": "Jira: correo",
+      "description": "El correo de tu cuenta de Atlassian.",
+      "default": ""
+    },
+    "jiraToken": {
+      "type": "string",
+      "title": "Jira: token de API",
+      "description": "Token de id.atlassian.com/manage-profile/security/api-tokens. Se guarda en el almacén seguro.",
+      "sensitive": true,
       "default": ""
     }
   }

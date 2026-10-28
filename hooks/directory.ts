@@ -1,4 +1,4 @@
-import type { Floor, FloorStatus } from '../types'
+import type { Floor, FloorStatus, JiraState } from '../types'
 import { formatTokens } from './tower'
 
 // The lobby's building directory: one lit card per agent, the ones that need
@@ -8,11 +8,13 @@ export type DirectoryInput = {
   floors: Floor[]
   meId: string | null
   now: number
+  jira?: JiraState | null
 }
 
 const W = 360
 const HEAD = 34
 const ROW = 58
+const TICKET = 15
 const FOOT = 14
 const PIXEL = `font-family="'Press Start 2P','Silkscreen',ui-monospace,Consolas,monospace"`
 const SANS = `font-family="'Segoe UI',system-ui,-apple-system,sans-serif"`
@@ -87,11 +89,20 @@ function card(f: Floor, y: number, label: string, isMe: boolean, maxTokens: numb
   const pw = pill.length * 4.4 + 10
   g += `<rect x="${tx}" y="${y + 20}" width="${pw}" height="10" rx="5" fill="${look.color}" fill-opacity="0.18" stroke="${look.color}" stroke-opacity="0.6" stroke-width="0.8"/>`
   g += `<text x="${tx + pw / 2}" y="${y + 27.4}" ${SANS} font-size="6.4" fill="${look.color}" text-anchor="middle" font-weight="700" letter-spacing="0.4">${pill}</text>`
+  let chipX = tx + pw + 4
   if (f.project) {
-    const proj = cut(f.project, 22)
+    const proj = cut(f.project, f.mr ? 14 : 22)
     const jw = proj.length * 4.2 + 12
-    g += `<rect x="${tx + pw + 4}" y="${y + 20}" width="${jw}" height="10" rx="3" fill="#ffffff" fill-opacity="0.06"/>`
-    g += `<text x="${tx + pw + 10}" y="${y + 27.3}" ${MONO} font-size="6.4" fill="#9aa6c4">${esc(proj)}</text>`
+    g += `<rect x="${chipX}" y="${y + 20}" width="${jw}" height="10" rx="3" fill="#ffffff" fill-opacity="0.06"/>`
+    g += `<text x="${chipX + 6}" y="${y + 27.3}" ${MONO} font-size="6.4" fill="#9aa6c4">${esc(proj)}</text>`
+    chipX += jw + 4
+  }
+  // the merge request (GitLab) or pull request (GitHub) the agent linked last
+  if (f.mr) {
+    const label = `MR ${f.mr.label}`
+    const mw = label.length * 4.2 + 12
+    g += `<rect x="${chipX}" y="${y + 20}" width="${mw}" height="10" rx="3" fill="#fc6d26" fill-opacity="0.18" stroke="#fc6d26" stroke-opacity="0.6" stroke-width="0.8"/>`
+    g += `<text x="${chipX + 6}" y="${y + 27.3}" ${MONO} font-size="6.4" fill="#fc9d6b">${esc(label)}</text>`
   }
 
   // what it is doing, with a caret while it works
@@ -120,7 +131,26 @@ function card(f: Floor, y: number, label: string, isMe: boolean, maxTokens: numb
   return `<g>${g}</g>`
 }
 
-export function renderDirectory({ floors, meId, now }: DirectoryInput) {
+// the person's Jira tickets under the cards: key, title, status
+function tickets(jira: JiraState, y: number) {
+  let g = `<rect x="16" y="${y}" width="${W - 32}" height="1" fill="url(#brass)" opacity="0.5"/>`
+  g += `<text x="20" y="${y + 15}" ${PIXEL} font-size="7" fill="url(#brass)" font-weight="bold" letter-spacing="1">JIRA</text>`
+  g += `<text x="56" y="${y + 15}" ${SANS} font-size="8" fill="#8b95b3">· mis tickets asignados</text>`
+  if (jira.error || jira.tickets.length === 0)
+    g += `<text x="20" y="${y + 31}" ${SANS} font-size="8" fill="#6b7895">${esc(jira.error ?? 'Nada asignado: bandeja limpia')}</text>`
+  jira.tickets.forEach((t, i) => {
+    const ty = y + 31 + i * TICKET
+    g += `<text x="20" y="${ty}" ${MONO} font-size="7.4" fill="#5ee1ff" font-weight="bold">${esc(cut(t.key, 11))}</text>`
+    g += `<text x="82" y="${ty}" ${SANS} font-size="7.8" fill="#c9d2ea">${esc(cut(t.summary, 38))}</text>`
+    g += `<text x="${W - 20}" y="${ty}" ${SANS} font-size="6.4" fill="#ffc531" text-anchor="end" font-weight="700">${esc(cut(t.status.toUpperCase(), 14))}</text>`
+  })
+  return g
+}
+
+const ticketsHeight = (jira: JiraState | null | undefined) =>
+  jira ? 24 + Math.max(1, jira.tickets.length) * TICKET : 0
+
+export function renderDirectory({ floors, meId, now, jira }: DirectoryInput) {
   // floor labels match the tower: offices fill two per level, from the bottom
   const labels = new Map<string, string>()
   floors.forEach((f, i) => labels.set(f.id, `${Math.floor(i / 2) + 1}${i % 2 === 0 ? 'A' : 'B'}`))
@@ -129,7 +159,8 @@ export function renderDirectory({ floors, meId, now }: DirectoryInput) {
   )
   const maxTokens = Math.max(0, ...floors.map(f => f.tokens))
   const total = floors.reduce((n, f) => n + f.costUsd, 0)
-  const H = HEAD + Math.max(1, rows.length) * ROW + FOOT
+  const cardsEnd = HEAD + Math.max(1, rows.length) * ROW
+  const H = cardsEnd + ticketsHeight(jira) + FOOT
 
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" preserveAspectRatio="xMidYMin meet" style="display:block">`
   svg += `<defs>` +
@@ -155,6 +186,7 @@ export function renderDirectory({ floors, meId, now }: DirectoryInput) {
   rows.forEach((f, i) => {
     svg += card(f, HEAD + i * ROW, labels.get(f.id) ?? '?', f.id === meId, maxTokens, now)
   })
+  if (jira) svg += tickets(jira, cardsEnd)
 
   svg += `</svg>`
   return { svg, height: H, width: W }

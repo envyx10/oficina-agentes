@@ -13,7 +13,7 @@ const OUT_DIR = path.join(HOME, '.claude', 'oficina-agentes')
 const CACHE = path.join(OUT_DIR, 'scan-cache.json')
 const RECENT_MS = 8 * 3600_000
 const MAX_SESSIONS = 40
-const CACHE_VERSION = 2
+const CACHE_VERSION = 3
 
 // $ per million tokens: input, output, cache write, cache read
 const PRICES = [
@@ -32,7 +32,7 @@ let dirty = false
 function blank() {
   return {
     offset: 0, tokens: 0, cost: 0, lastMsgId: null, title: null, agentName: null,
-    firstPrompt: null, lastKind: null, lastAt: 0, firstAt: 0, pendingTool: null, activity: null, cwd: null, model: null,
+    firstPrompt: null, lastKind: null, lastAt: 0, firstAt: 0, pendingTool: null, activity: null, cwd: null, model: null, mr: null,
   }
 }
 
@@ -71,6 +71,17 @@ function promptText(content) {
     return t ? t.text : null
   }
   return null
+}
+
+// A GitLab merge request (.../-/merge_requests/12) or GitHub pull request (.../pull/12) link
+// anywhere in a transcript line; the last one seen is the session's.
+// shortcut: a link inside a file the session merely read counts too, upgrade by reading only gh/glab output.
+const MR_RE = /https?:\/\/[^\s"'\\)<>\]]+?\/(?:-\/)?(merge_requests|pull)\/(\d+)/g
+function findMr(line) {
+  if (!line.includes('merge_requests/') && !line.includes('/pull/')) return null
+  let last = null
+  for (const m of line.matchAll(MR_RE)) last = { url: m[0], label: (m[1] === 'pull' ? '#' : '!') + m[2] }
+  return last
 }
 
 function apply(st, d) {
@@ -132,6 +143,8 @@ function readNew(file, size) {
       for (const line of lines) {
         if (!line) continue
         try { apply(st, JSON.parse(line)) } catch {}
+        const mr = findMr(line)
+        if (mr) st.mr = mr
       }
     }
     // keep a trailing partial line for the next read
@@ -204,6 +217,7 @@ function scan() {
         changedAt: stat.mtimeMs,
         subagents: subWorking,
         model: st.model || '',
+        mr: st.mr || null,
       })
     }
   }
@@ -251,8 +265,8 @@ function windowsLocation() {
   })
 }
 
-async function getJson(url) {
-  const res = await fetch(url, { headers: UA, signal: AbortSignal.timeout(10_000) })
+async function getJson(url, headers = UA) {
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) })
   if (!res.ok) throw new Error(String(res.status))
   return res.json()
 }
@@ -293,12 +307,36 @@ async function locate() {
   try { fs.mkdirSync(OUT_DIR, { recursive: true }); fs.writeFileSync(PLACE, JSON.stringify(place)) } catch {}
 }
 
+// The tickets assigned to the person in Jira Cloud (not done yet), asked every 5 min with an
+// API token from the mod's options. Without them nothing is asked and `jira` stays null.
+const JIRA_SITE = (process.env.JIRA_SITE || '').trim().replace(/\/+$/, '')
+const JIRA_EMAIL = (process.env.JIRA_EMAIL || '').trim()
+const JIRA_TOKEN = (process.env.JIRA_TOKEN || '').trim()
+const JIRA_MS = 5 * 60_000
+let jira = null
+
+async function fetchJira() {
+  if (!JIRA_SITE || !JIRA_EMAIL || !JIRA_TOKEN) return
+  const site = /^https?:\/\//.test(JIRA_SITE) ? JIRA_SITE : 'https://' + JIRA_SITE
+  const jql = 'assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC'
+  const auth = 'Basic ' + Buffer.from(JIRA_EMAIL + ':' + JIRA_TOKEN).toString('base64')
+  try {
+    const j = await getJson(`${site}/rest/api/3/search/jql?maxResults=8&fields=summary,status&jql=${encodeURIComponent(jql)}`,
+      { ...UA, Accept: 'application/json', Authorization: auth })
+    jira = { tickets: (j.issues || []).map(i => ({ key: i.key, summary: i.fields.summary || '', status: i.fields.status?.name || '' })) }
+  } catch (e) {
+    jira = { tickets: [], error: 'Jira: error ' + e.message }
+  }
+}
+
 const once = process.argv.includes('--once')
-const tick = () => process.stdout.write(JSON.stringify({ ...scan(), place }) + '\n')
+const tick = () => process.stdout.write(JSON.stringify({ ...scan(), place, jira }) + '\n')
 tick()
 saveCache()
 if (!once) {
   locate().then(tick, () => {})
+  fetchJira().then(tick, () => {})
+  setInterval(() => { fetchJira().catch(() => {}) }, JIRA_MS)
   setInterval(() => { locate().catch(() => {}) }, PLACE_MS)
   setInterval(tick, 2000)
   setInterval(saveCache, 30_000)

@@ -15,12 +15,20 @@ export type Floor = {
   project?: string
   /** subagents of the session working right now */
   subagents?: number
+  /** the last GitLab merge request or GitHub pull request the session linked: `!12` / `#12` */
+  mr?: { url: string; label: string } | null
 }
+
+/** A Jira ticket assigned to the person. */
+export type Ticket = { key: string; summary: string; status: string }
+
+/** The person's open Jira tickets, or why they could not be read; null when Jira is not set up. */
+export type JiraState = { tickets: Ticket[]; error?: string }
 
 export type Weather = { tempC: number; label: string; city?: string; timeZone?: string }
 
 /** What the drawing of the tower shows: taken when a floor changes colour, or every 5 min. */
-export type TowerSnapshot = { floors: Floor[]; historic: number; tpm: number; at: number }
+export type TowerSnapshot = { floors: Floor[]; historic: number; tpm: number; at: number; jira?: JiraState | null }
 
 declare module 'claude-code' {
   interface PluginState {
